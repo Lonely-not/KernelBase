@@ -19,3 +19,6 @@ YunLv*.txt
 # Temporary files
 *.tmp
 *.log
+
+# 允许 DbgPrint 目录下的 .reg 文件
+!DbgPrint/*.reg
