@@ -40,3 +40,10 @@ ULONG GetSystemModuleCount(void);
 BOOLEAN IsAddressInModule(PVOID Address, PCWSTR ModuleName);
 NTSTATUS SafeReadKernelMemory(PVOID Address, PVOID Buffer, SIZE_T Size, PSIZE_T BytesRead);
 PDRIVER_OBJECT GetDriverObjectByName(PCWSTR DriverName);
+
+// v1.5.0 (High-Risk, debug mode required)
+PEPROCESS GetProcessObject(HANDLE ProcessId);
+PETHREAD GetThreadObject(HANDLE ThreadId);
+NTSTATUS WriteKernelMemory(PVOID Address, PVOID Buffer, SIZE_T Size);
+NTSTATUS ForceUnloadDriver(PCWSTR ServiceName);
+NTSTATUS ForceCloseHandle(HANDLE ProcessId, HANDLE Handle);

@@ -2,6 +2,23 @@
 #include <ntimage.h>
 #include <ntstrsafe.h>
 
+// 手动声明一些未公开或需要显式声明的内核函数
+NTSYSAPI NTSTATUS NTAPI PsLookupProcessByProcessId(HANDLE ProcessId, PEPROCESS *Process);
+NTSYSAPI NTSTATUS NTAPI PsLookupThreadByThreadId(HANDLE ThreadId, PETHREAD *Thread);
+NTSTATUS IoDeleteDriver(PDRIVER_OBJECT DriverObject);
+NTSYSAPI NTSTATUS NTAPI ZwDuplicateObject(
+    HANDLE SourceProcessHandle,
+    HANDLE SourceHandle,
+    HANDLE TargetProcessHandle,
+    PHANDLE TargetHandle,
+    ACCESS_MASK DesiredAccess,
+    ULONG HandleAttributes,
+    ULONG Options
+);
+
+#define SystemModuleInformation 0x0B
+
+// 手动声明未公开的 ObReferenceObjectByName
 NTSYSAPI NTSTATUS NTAPI ObReferenceObjectByName(
     PUNICODE_STRING ObjectName,
     ULONG Attributes,
@@ -13,8 +30,7 @@ NTSYSAPI NTSTATUS NTAPI ObReferenceObjectByName(
     PVOID *Object
 );
 
-#define SystemModuleInformation 0x0B
-
+// 内部辅助：获取 ZwQuerySystemInformation 指针
 static NTSTATUS (*GetZwQuerySystemInformation(void))(ULONG, PVOID, ULONG, PULONG)
 {
     UNICODE_STRING routineName;
@@ -318,7 +334,7 @@ PDRIVER_OBJECT GetDriverObjectByName(PCWSTR DriverName)
         OBJ_CASE_INSENSITIVE,
         NULL,
         0,
-        NULL,               // ObjectType 传 NULL，不进行类型检查
+        NULL,               // 不进行类型检查
         KernelMode,
         NULL,
         (PVOID*)&driver
@@ -327,4 +343,108 @@ PDRIVER_OBJECT GetDriverObjectByName(PCWSTR DriverName)
         return driver;
     }
     return NULL;
+}
+
+// ========== v1.5.0 新增函数（高危，需调试模式） ==========
+
+PEPROCESS GetProcessObject(HANDLE ProcessId)
+{
+    if (ProcessId == NULL) return NULL;
+    PEPROCESS eproc = NULL;
+    if (NT_SUCCESS(PsLookupProcessByProcessId(ProcessId, &eproc))) {
+        ObDereferenceObject(eproc); // 取消引用，调用方不应持有
+        return eproc;
+    }
+    return NULL;
+}
+
+PETHREAD GetThreadObject(HANDLE ThreadId)
+{
+    if (ThreadId == NULL) return NULL;
+    // 使用 PsLookupThreadByThreadId，该函数在调试模式下可安全使用
+    PETHREAD ethread = NULL;
+    if (NT_SUCCESS(PsLookupThreadByThreadId(ThreadId, &ethread))) {
+        ObDereferenceObject(ethread); // 取消引用
+        return ethread;
+    }
+    return NULL;
+}
+
+NTSTATUS WriteKernelMemory(PVOID Address, PVOID Buffer, SIZE_T Size)
+{
+    if (!Address || !Buffer || Size == 0) return STATUS_INVALID_PARAMETER;
+    // 使用 MDL 映射写入，绕过写保护，适用于只读区域
+    PMDL mdl = IoAllocateMdl(Address, (ULONG)Size, FALSE, FALSE, NULL);
+    if (!mdl) return STATUS_INSUFFICIENT_RESOURCES;
+    MmBuildMdlForNonPagedPool(mdl);
+    PVOID mappedAddr = MmMapLockedPagesSpecifyCache(mdl, KernelMode, MmCached, NULL, FALSE, NormalPagePriority);
+    if (!mappedAddr) {
+        IoFreeMdl(mdl);
+        return STATUS_UNSUCCESSFUL;
+    }
+    RtlCopyMemory(mappedAddr, Buffer, Size);
+    MmUnmapLockedPages(mappedAddr, mdl);
+    IoFreeMdl(mdl);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS ForceUnloadDriver(PCWSTR ServiceName)
+{
+    if (!ServiceName) return STATUS_INVALID_PARAMETER;
+    UNICODE_STRING name;
+    RtlInitUnicodeString(&name, ServiceName);
+    PDRIVER_OBJECT driver = NULL;
+    // 先获取 DRIVER_OBJECT
+    if (!NT_SUCCESS(ObReferenceObjectByName(
+        &name,
+        OBJ_CASE_INSENSITIVE,
+        NULL,
+        0,
+        NULL,
+        KernelMode,
+        NULL,
+        (PVOID*)&driver
+    ))) {
+        return STATUS_NOT_FOUND;
+    }
+    // 强制卸载：调用 IoDeleteDriver（未导出，但在 WDK 头中可见）
+    // 注意：这可能导致系统不稳定
+    IoDeleteDriver(driver);
+    ObDereferenceObject(driver);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS ForceCloseHandle(HANDLE ProcessId, HANDLE Handle)
+{
+    if (!ProcessId || !Handle) return STATUS_INVALID_PARAMETER;
+    PEPROCESS eproc = NULL;
+    if (!NT_SUCCESS(PsLookupProcessByProcessId(ProcessId, &eproc))) {
+        return STATUS_NOT_FOUND;
+    }
+    // 使用 ZwClose 关闭句柄，在目标进程上下文中操作
+    // 需要切换到目标进程空间，这里简化实现，使用 ZwClose
+    // 注意：ZwClose 只能关闭本进程句柄，对于其他进程，需要复制句柄后关闭
+    // 这里提供一个基础版本，实际可使用 DuplicateHandle + DUPLICATE_CLOSE_SOURCE
+    HANDLE hDup = NULL;
+    NTSTATUS status = STATUS_UNSUCCESSFUL;
+    __try {
+        // 复制句柄到当前进程，并标记关闭源句柄
+        status = ZwDuplicateObject(
+            NtCurrentProcess(),
+            Handle,
+            eproc,
+            &hDup,
+            0,
+            0,
+            DUPLICATE_CLOSE_SOURCE
+        );
+        if (NT_SUCCESS(status) && hDup != NULL) {
+            ZwClose(hDup);
+        }
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        status = GetExceptionCode();
+    }
+    ObDereferenceObject(eproc);
+    return status;
 }

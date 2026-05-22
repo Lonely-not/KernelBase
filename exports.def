@@ -12,3 +12,8 @@ EXPORTS
     IsAddressInModule
     SafeReadKernelMemory
     GetDriverObjectByName
+    GetProcessObject
+    GetThreadObject
+    WriteKernelMemory
+    ForceUnloadDriver
+    ForceCloseHandle
