@@ -20,9 +20,9 @@ Functions are categorized by risk level. For full per‑function documentation, 
 
 | Risk Level / 风险等级 | Count / 数量 | Description / 说明 |
 |-----------------------|--------------|-------------------|
-| ✅ **Safe / 安全** | 8 | Read‑only operations, safe to call anytime. / 只读操作，可随时调用。 |
-| ⚠️ **Moderate / 中危** | 5 | Returns sensitive pointers or requires IRQL caution. / 返回敏感指针或需注意 IRQL。 |
-| 🔴 **High / 高危** | 4 | **Must** attach a kernel debugger (PatchGuard disabled). / **必须**连接内核调试器（PatchGuard 禁用）。 |
+| ✅ **Safe / 安全** | 10 | Read‑only operations, safe to call anytime. / 只读操作，可随时调用。 |
+| ⚠️ **Moderate / 中危** | 6 | Returns sensitive pointers or requires IRQL caution. / 返回敏感指针或需注意 IRQL。 |
+| 🔴 **High / 高危** | 6 | **Must** attach a kernel debugger (PatchGuard disabled). / **必须**连接内核调试器（PatchGuard 禁用）。 |
 
 > For detailed risk level definitions and usage preconditions, see [Risk Levels Explained](https://github.com/YunLv-L/KernelBase/wiki/Risk-Levels-Explained).  
 > 详细风险等级定义和使用前提请见 [风险等级说明](https://github.com/YunLv-L/KernelBase/wiki/Risk-Levels-Explained)。
@@ -62,6 +62,9 @@ For a complete walkthrough, see the [Quick Start Wiki](https://github.com/YunLv-
 
 ## Signing / 签名
 
+> 💡 **为了让你更快上手：** KernelBase 在 `certs/` 目录下提供了一个公共测试证书，方便你直接签名加载，省去生成证书的步骤。  
+> **To help you get started quickly:** KernelBase includes a public test certificate in the `certs/` folder, so you can sign and load the driver right away without extra setup.
+
 ### Using the provided test certificate / 使用提供的测试证书
 
 A public test certificate is included in the `certs/` folder for development purposes only.  
@@ -95,6 +98,23 @@ Before loading the driver, enable test signing mode / 加载驱动前，先开�
 bcdedit /set testsigning on
 ```
 Then restart the system / 然后重启系统。
+
+### Fix DebugView No Output / 解决 DebugView 无输出
+
+If DebugView shows no kernel output after loading KernelBase, enable DbgPrint via registry:  
+如果加载 KernelBase 后 DebugView 没有内核输出，可通过注册表启用 DbgPrint：
+
+```cmd
+regedit /s DbgPrint\Enable_DbgPrint.reg
+shutdown /r /t 0
+```
+
+To restore the default setting:  
+要恢复默认设置：
+
+```cmd
+regedit /s DbgPrint\Disable_DbgPrint.reg
+```
 
 ---
 
@@ -240,8 +260,6 @@ This project is licensed under the **Apache License 2.0**.
 本项目采用 **Apache License 2.0** 授权。  
 See the [LICENSE](LICENSE) file for the full license text.  
 完整许可证文本请查看 [LICENSE](LICENSE) 文件。
-This project includes a [NOTICE](NOTICE) file with attribution requirements.  
-本项目包含 [NOTICE](NOTICE) 文件，其中说明了署名要求。
 
 ---
 
