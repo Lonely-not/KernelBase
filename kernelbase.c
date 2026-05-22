@@ -2,18 +2,24 @@
 #include <ntimage.h>
 #include <ntstrsafe.h>
 
-// 手动声明一些未公开或需要显式声明的内核函数
-NTSYSAPI NTSTATUS NTAPI PsLookupProcessByProcessId(HANDLE ProcessId, PEPROCESS *Process);
-NTSYSAPI NTSTATUS NTAPI PsLookupThreadByThreadId(HANDLE ThreadId, PETHREAD *Thread);
-NTSTATUS IoDeleteDriver(PDRIVER_OBJECT DriverObject);
-NTSYSAPI NTSTATUS NTAPI ZwDuplicateObject(
-    HANDLE SourceProcessHandle,
-    HANDLE SourceHandle,
-    HANDLE TargetProcessHandle,
-    PHANDLE TargetHandle,
-    ACCESS_MASK DesiredAccess,
-    ULONG HandleAttributes,
-    ULONG Options
+// 手动定义 KAPC_STATE 结构体（用于 KeStackAttachProcess）
+typedef struct _KAPC_STATE {
+    LIST_ENTRY ApcListHead[2];
+    PKPROCESS Process;
+    UCHAR InProgressFlags;
+    UCHAR KernelApcInProgress;
+    UCHAR KernelApcPending;
+    UCHAR UserApcPending;
+} KAPC_STATE, *PRKAPC_STATE;
+
+// 声明 KeStackAttachProcess 和 KeUnstackDetachProcess（两者均为 ntoskrnl 导出函数）
+NTSYSAPI VOID NTAPI KeStackAttachProcess(
+    PEPROCESS Process,
+    PRKAPC_STATE ApcState
+);
+
+NTSYSAPI VOID NTAPI KeUnstackDetachProcess(
+    PRKAPC_STATE ApcState
 );
 
 #define SystemModuleInformation 0x0B
@@ -28,6 +34,16 @@ NTSYSAPI NTSTATUS NTAPI ObReferenceObjectByName(
     KPROCESSOR_MODE AccessMode,
     PVOID ParseContext,
     PVOID *Object
+);
+
+// 手动声明未声明但已导出的函数
+NTSYSAPI NTSTATUS NTAPI PsLookupProcessByProcessId(HANDLE ProcessId, PEPROCESS *Process);
+NTSYSAPI NTSTATUS NTAPI PsLookupThreadByThreadId(HANDLE ThreadId, PETHREAD *Thread);
+NTSTATUS IoDeleteDriver(PDRIVER_OBJECT DriverObject);
+NTSYSAPI NTSTATUS NTAPI ZwDuplicateObject(
+    HANDLE SourceProcessHandle, HANDLE SourceHandle,
+    HANDLE TargetProcessHandle, PHANDLE TargetHandle,
+    ACCESS_MASK DesiredAccess, ULONG HandleAttributes, ULONG Options
 );
 
 // 内部辅助：获取 ZwQuerySystemInformation 指针
@@ -330,14 +346,8 @@ PDRIVER_OBJECT GetDriverObjectByName(PCWSTR DriverName)
     RtlInitUnicodeString(&name, DriverName);
     PDRIVER_OBJECT driver = NULL;
     if (NT_SUCCESS(ObReferenceObjectByName(
-        &name,
-        OBJ_CASE_INSENSITIVE,
-        NULL,
-        0,
-        NULL,               // 不进行类型检查
-        KernelMode,
-        NULL,
-        (PVOID*)&driver
+        &name, OBJ_CASE_INSENSITIVE, NULL, 0,
+        NULL, KernelMode, NULL, (PVOID*)&driver
     ))) {
         ObDereferenceObject(driver);
         return driver;
@@ -345,14 +355,14 @@ PDRIVER_OBJECT GetDriverObjectByName(PCWSTR DriverName)
     return NULL;
 }
 
-// ========== v1.5.0 新增函数（高危，需调试模式） ==========
+// ========== v1.5.0 新增函数 ==========
 
 PEPROCESS GetProcessObject(HANDLE ProcessId)
 {
     if (ProcessId == NULL) return NULL;
     PEPROCESS eproc = NULL;
     if (NT_SUCCESS(PsLookupProcessByProcessId(ProcessId, &eproc))) {
-        ObDereferenceObject(eproc); // 取消引用，调用方不应持有
+        ObDereferenceObject(eproc);
         return eproc;
     }
     return NULL;
@@ -361,10 +371,9 @@ PEPROCESS GetProcessObject(HANDLE ProcessId)
 PETHREAD GetThreadObject(HANDLE ThreadId)
 {
     if (ThreadId == NULL) return NULL;
-    // 使用 PsLookupThreadByThreadId，该函数在调试模式下可安全使用
     PETHREAD ethread = NULL;
     if (NT_SUCCESS(PsLookupThreadByThreadId(ThreadId, &ethread))) {
-        ObDereferenceObject(ethread); // 取消引用
+        ObDereferenceObject(ethread);
         return ethread;
     }
     return NULL;
@@ -373,15 +382,11 @@ PETHREAD GetThreadObject(HANDLE ThreadId)
 NTSTATUS WriteKernelMemory(PVOID Address, PVOID Buffer, SIZE_T Size)
 {
     if (!Address || !Buffer || Size == 0) return STATUS_INVALID_PARAMETER;
-    // 使用 MDL 映射写入，绕过写保护，适用于只读区域
     PMDL mdl = IoAllocateMdl(Address, (ULONG)Size, FALSE, FALSE, NULL);
     if (!mdl) return STATUS_INSUFFICIENT_RESOURCES;
     MmBuildMdlForNonPagedPool(mdl);
     PVOID mappedAddr = MmMapLockedPagesSpecifyCache(mdl, KernelMode, MmCached, NULL, FALSE, NormalPagePriority);
-    if (!mappedAddr) {
-        IoFreeMdl(mdl);
-        return STATUS_UNSUCCESSFUL;
-    }
+    if (!mappedAddr) { IoFreeMdl(mdl); return STATUS_UNSUCCESSFUL; }
     RtlCopyMemory(mappedAddr, Buffer, Size);
     MmUnmapLockedPages(mappedAddr, mdl);
     IoFreeMdl(mdl);
@@ -394,21 +399,10 @@ NTSTATUS ForceUnloadDriver(PCWSTR ServiceName)
     UNICODE_STRING name;
     RtlInitUnicodeString(&name, ServiceName);
     PDRIVER_OBJECT driver = NULL;
-    // 先获取 DRIVER_OBJECT
     if (!NT_SUCCESS(ObReferenceObjectByName(
-        &name,
-        OBJ_CASE_INSENSITIVE,
-        NULL,
-        0,
-        NULL,
-        KernelMode,
-        NULL,
-        (PVOID*)&driver
-    ))) {
-        return STATUS_NOT_FOUND;
-    }
-    // 强制卸载：调用 IoDeleteDriver（未导出，但在 WDK 头中可见）
-    // 注意：这可能导致系统不稳定
+        &name, OBJ_CASE_INSENSITIVE, NULL, 0,
+        NULL, KernelMode, NULL, (PVOID*)&driver
+    ))) return STATUS_NOT_FOUND;
     IoDeleteDriver(driver);
     ObDereferenceObject(driver);
     return STATUS_SUCCESS;
@@ -418,33 +412,107 @@ NTSTATUS ForceCloseHandle(HANDLE ProcessId, HANDLE Handle)
 {
     if (!ProcessId || !Handle) return STATUS_INVALID_PARAMETER;
     PEPROCESS eproc = NULL;
-    if (!NT_SUCCESS(PsLookupProcessByProcessId(ProcessId, &eproc))) {
-        return STATUS_NOT_FOUND;
-    }
-    // 使用 ZwClose 关闭句柄，在目标进程上下文中操作
-    // 需要切换到目标进程空间，这里简化实现，使用 ZwClose
-    // 注意：ZwClose 只能关闭本进程句柄，对于其他进程，需要复制句柄后关闭
-    // 这里提供一个基础版本，实际可使用 DuplicateHandle + DUPLICATE_CLOSE_SOURCE
+    if (!NT_SUCCESS(PsLookupProcessByProcessId(ProcessId, &eproc))) return STATUS_NOT_FOUND;
     HANDLE hDup = NULL;
     NTSTATUS status = STATUS_UNSUCCESSFUL;
     __try {
-        // 复制句柄到当前进程，并标记关闭源句柄
         status = ZwDuplicateObject(
-            NtCurrentProcess(),
-            Handle,
-            eproc,
-            &hDup,
-            0,
-            0,
-            DUPLICATE_CLOSE_SOURCE
+            NtCurrentProcess(), Handle, eproc, &hDup,
+            0, 0, DUPLICATE_CLOSE_SOURCE
         );
-        if (NT_SUCCESS(status) && hDup != NULL) {
-            ZwClose(hDup);
-        }
+        if (NT_SUCCESS(status) && hDup != NULL) ZwClose(hDup);
     }
     __except(EXCEPTION_EXECUTE_HANDLER) {
         status = GetExceptionCode();
     }
+    ObDereferenceObject(eproc);
+    return status;
+}
+
+// ========== v1.6.0 新增函数 ==========
+
+// 获取 PEB（进程环境块）
+PVOID GetProcessPeb(HANDLE ProcessId)
+{
+    if (ProcessId == NULL) return NULL;
+    PEPROCESS eproc = NULL;
+    if (!NT_SUCCESS(PsLookupProcessByProcessId(ProcessId, &eproc))) return NULL;
+    // PsGetProcessPeb 是已导出但未声明的函数，通过 MmGetSystemRoutineAddress 获取
+    UNICODE_STRING funcName;
+    RtlInitUnicodeString(&funcName, L"PsGetProcessPeb");
+    PVOID (*pfnPsGetProcessPeb)(PEPROCESS) = (PVOID (*)(PEPROCESS))MmGetSystemRoutineAddress(&funcName);
+    PVOID peb = NULL;
+    if (pfnPsGetProcessPeb) {
+        peb = pfnPsGetProcessPeb(eproc);
+    }
+    ObDereferenceObject(eproc);
+    return peb;
+}
+
+// 获取进程主模块基址（EXE 基址）
+PVOID GetProcessMainModuleBase(HANDLE ProcessId)
+{
+    if (ProcessId == NULL) return NULL;
+    PVOID peb = GetProcessPeb(ProcessId);
+    if (!peb) return NULL;
+    // PEB 结构：+0x018 Ldr : Ptr64 _PEB_LDR_DATA
+    // PEB_LDR_DATA 结构：+0x010 InLoadOrderModuleList : _LIST_ENTRY
+    // 从 InLoadOrderModuleList 获取第一个模块（即主模块）
+    __try {
+        PVOID ldr = *(PVOID*)((PUCHAR)peb + 0x018); // PEB->Ldr
+        if (!ldr) return NULL;
+        // InLoadOrderModuleList 位于 LDR 的 +0x010
+        PLIST_ENTRY head = (PLIST_ENTRY)((PUCHAR)ldr + 0x010);
+        PLIST_ENTRY first = head->Flink;
+        if (first == head) return NULL;
+        // LDR_DATA_TABLE_ENTRY 的 DllBase 位于 +0x030
+        PVOID dllBase = *(PVOID*)((PUCHAR)first + 0x030);
+        return dllBase;
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        return NULL;
+    }
+}
+
+// 跨进程内存读取
+NTSTATUS ReadProcessMemory(HANDLE ProcessId, PVOID Address, PVOID Buffer, SIZE_T Size, PSIZE_T BytesRead)
+{
+    if (!Address || !Buffer || Size == 0) return STATUS_INVALID_PARAMETER;
+    PEPROCESS eproc = NULL;
+    if (!NT_SUCCESS(PsLookupProcessByProcessId(ProcessId, &eproc))) return STATUS_NOT_FOUND;
+    KAPC_STATE apcState;
+    KeStackAttachProcess(eproc, &apcState);
+    SIZE_T copied = 0;
+    NTSTATUS status = STATUS_SUCCESS;
+    __try {
+        RtlCopyMemory(Buffer, Address, Size);
+        copied = Size;
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        status = GetExceptionCode();
+    }
+    KeUnstackDetachProcess(&apcState);
+    if (BytesRead) *BytesRead = copied;
+    ObDereferenceObject(eproc);
+    return status;
+}
+
+// 跨进程内存写入
+NTSTATUS WriteProcessMemory(HANDLE ProcessId, PVOID Address, PVOID Buffer, SIZE_T Size)
+{
+    if (!Address || !Buffer || Size == 0) return STATUS_INVALID_PARAMETER;
+    PEPROCESS eproc = NULL;
+    if (!NT_SUCCESS(PsLookupProcessByProcessId(ProcessId, &eproc))) return STATUS_NOT_FOUND;
+    KAPC_STATE apcState;
+    KeStackAttachProcess(eproc, &apcState);
+    NTSTATUS status = STATUS_SUCCESS;
+    __try {
+        RtlCopyMemory(Address, Buffer, Size);
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        status = GetExceptionCode();
+    }
+    KeUnstackDetachProcess(&apcState);
     ObDereferenceObject(eproc);
     return status;
 }

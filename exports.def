@@ -17,3 +17,7 @@ EXPORTS
     WriteKernelMemory
     ForceUnloadDriver
     ForceCloseHandle
+    ReadProcessMemory
+    WriteProcessMemory
+    GetProcessPeb
+    GetProcessMainModuleBase

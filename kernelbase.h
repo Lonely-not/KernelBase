@@ -47,3 +47,9 @@ PETHREAD GetThreadObject(HANDLE ThreadId);
 NTSTATUS WriteKernelMemory(PVOID Address, PVOID Buffer, SIZE_T Size);
 NTSTATUS ForceUnloadDriver(PCWSTR ServiceName);
 NTSTATUS ForceCloseHandle(HANDLE ProcessId, HANDLE Handle);
+
+// v1.6.0
+NTSTATUS ReadProcessMemory(HANDLE ProcessId, PVOID Address, PVOID Buffer, SIZE_T Size, PSIZE_T BytesRead);
+NTSTATUS WriteProcessMemory(HANDLE ProcessId, PVOID Address, PVOID Buffer, SIZE_T Size);
+PVOID GetProcessPeb(HANDLE ProcessId);
+PVOID GetProcessMainModuleBase(HANDLE ProcessId);
