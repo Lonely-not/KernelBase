@@ -20,8 +20,8 @@ Functions are categorized by risk level. For full per‑function documentation, 
 
 | Risk Level / 风险等级 | Count / 数量 | Description / 说明 |
 |-----------------------|--------------|-------------------|
-| ✅ **Safe / 安全** | 10 | Read‑only operations, safe to call anytime. / 只读操作，可随时调用。 |
-| ⚠️ **Moderate / 中危** | 6 | Returns sensitive pointers or requires IRQL caution. / 返回敏感指针或需注意 IRQL。 |
+| ✅ **Safe / 安全** | 13 | Read‑only operations, safe to call anytime. / 只读操作，可随时调用。 |
+| ⚠️ **Moderate / 中危** | 7 | Returns sensitive pointers or requires IRQL caution. / 返回敏感指针或需注意 IRQL。 |
 | 🔴 **High / 高危** | 6 | **Must** attach a kernel debugger (PatchGuard disabled). / **必须**连接内核调试器（PatchGuard 禁用）。 |
 
 > For detailed risk level definitions and usage preconditions, see [Risk Levels Explained](https://github.com/YunLv-L/KernelBase/wiki/Risk-Levels-Explained).  
