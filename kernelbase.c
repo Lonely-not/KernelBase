@@ -2,27 +2,8 @@
 #include <ntimage.h>
 #include <ntstrsafe.h>
 
-// 手动定义 KAPC_STATE 结构体（用于 KeStackAttachProcess）
-typedef struct _KAPC_STATE {
-    LIST_ENTRY ApcListHead[2];
-    PKPROCESS Process;
-    UCHAR InProgressFlags;
-    UCHAR KernelApcInProgress;
-    UCHAR KernelApcPending;
-    UCHAR UserApcPending;
-} KAPC_STATE, *PRKAPC_STATE;
-
-// 声明 KeStackAttachProcess 和 KeUnstackDetachProcess（两者均为 ntoskrnl 导出函数）
-NTSYSAPI VOID NTAPI KeStackAttachProcess(
-    PEPROCESS Process,
-    PRKAPC_STATE ApcState
-);
-
-NTSYSAPI VOID NTAPI KeUnstackDetachProcess(
-    PRKAPC_STATE ApcState
-);
-
 #define SystemModuleInformation 0x0B
+#define PROCESS_QUERY_INFORMATION 0x0400
 
 // 手动声明未公开的 ObReferenceObjectByName
 NTSYSAPI NTSTATUS NTAPI ObReferenceObjectByName(
@@ -44,6 +25,44 @@ NTSYSAPI NTSTATUS NTAPI ZwDuplicateObject(
     HANDLE SourceProcessHandle, HANDLE SourceHandle,
     HANDLE TargetProcessHandle, PHANDLE TargetHandle,
     ACCESS_MASK DesiredAccess, ULONG HandleAttributes, ULONG Options
+);
+
+// 用于动态获取父进程 ID 的 API 声明
+NTSYSAPI NTSTATUS NTAPI ZwQueryInformationProcess(
+    HANDLE ProcessHandle,
+    PROCESSINFOCLASS ProcessInformationClass,
+    PVOID ProcessInformation,
+    ULONG ProcessInformationLength,
+    PULONG ReturnLength
+);
+NTSYSAPI NTSTATUS NTAPI ObOpenObjectByPointer(
+    PVOID Object,
+    ULONG HandleAttributes,
+    PACCESS_STATE PassedAccessState,
+    ACCESS_MASK DesiredAccess,
+    POBJECT_TYPE ObjectType,
+    KPROCESSOR_MODE AccessMode,
+    PHANDLE Handle
+);
+// PsProcessType 已在 WDK 头文件中声明，无需 extern
+
+// 手动定义 KAPC_STATE 结构体
+typedef struct _KAPC_STATE {
+    LIST_ENTRY ApcListHead[2];
+    PKPROCESS Process;
+    UCHAR InProgressFlags;
+    UCHAR KernelApcInProgress;
+    UCHAR KernelApcPending;
+    UCHAR UserApcPending;
+} KAPC_STATE, *PRKAPC_STATE;
+
+// 声明 KeStackAttachProcess 和 KeUnstackDetachProcess
+NTSYSAPI VOID NTAPI KeStackAttachProcess(
+    PEPROCESS Process,
+    PRKAPC_STATE ApcState
+);
+NTSYSAPI VOID NTAPI KeUnstackDetachProcess(
+    PRKAPC_STATE ApcState
 );
 
 // 内部辅助：获取 ZwQuerySystemInformation 指针
@@ -431,13 +450,11 @@ NTSTATUS ForceCloseHandle(HANDLE ProcessId, HANDLE Handle)
 
 // ========== v1.6.0 新增函数 ==========
 
-// 获取 PEB（进程环境块）
 PVOID GetProcessPeb(HANDLE ProcessId)
 {
     if (ProcessId == NULL) return NULL;
     PEPROCESS eproc = NULL;
     if (!NT_SUCCESS(PsLookupProcessByProcessId(ProcessId, &eproc))) return NULL;
-    // PsGetProcessPeb 是已导出但未声明的函数，通过 MmGetSystemRoutineAddress 获取
     UNICODE_STRING funcName;
     RtlInitUnicodeString(&funcName, L"PsGetProcessPeb");
     PVOID (*pfnPsGetProcessPeb)(PEPROCESS) = (PVOID (*)(PEPROCESS))MmGetSystemRoutineAddress(&funcName);
@@ -449,23 +466,17 @@ PVOID GetProcessPeb(HANDLE ProcessId)
     return peb;
 }
 
-// 获取进程主模块基址（EXE 基址）
 PVOID GetProcessMainModuleBase(HANDLE ProcessId)
 {
     if (ProcessId == NULL) return NULL;
     PVOID peb = GetProcessPeb(ProcessId);
     if (!peb) return NULL;
-    // PEB 结构：+0x018 Ldr : Ptr64 _PEB_LDR_DATA
-    // PEB_LDR_DATA 结构：+0x010 InLoadOrderModuleList : _LIST_ENTRY
-    // 从 InLoadOrderModuleList 获取第一个模块（即主模块）
     __try {
-        PVOID ldr = *(PVOID*)((PUCHAR)peb + 0x018); // PEB->Ldr
+        PVOID ldr = *(PVOID*)((PUCHAR)peb + 0x018);
         if (!ldr) return NULL;
-        // InLoadOrderModuleList 位于 LDR 的 +0x010
         PLIST_ENTRY head = (PLIST_ENTRY)((PUCHAR)ldr + 0x010);
         PLIST_ENTRY first = head->Flink;
         if (first == head) return NULL;
-        // LDR_DATA_TABLE_ENTRY 的 DllBase 位于 +0x030
         PVOID dllBase = *(PVOID*)((PUCHAR)first + 0x030);
         return dllBase;
     }
@@ -474,7 +485,6 @@ PVOID GetProcessMainModuleBase(HANDLE ProcessId)
     }
 }
 
-// 跨进程内存读取
 NTSTATUS ReadProcessMemory(HANDLE ProcessId, PVOID Address, PVOID Buffer, SIZE_T Size, PSIZE_T BytesRead)
 {
     if (!Address || !Buffer || Size == 0) return STATUS_INVALID_PARAMETER;
@@ -497,7 +507,6 @@ NTSTATUS ReadProcessMemory(HANDLE ProcessId, PVOID Address, PVOID Buffer, SIZE_T
     return status;
 }
 
-// 跨进程内存写入
 NTSTATUS WriteProcessMemory(HANDLE ProcessId, PVOID Address, PVOID Buffer, SIZE_T Size)
 {
     if (!Address || !Buffer || Size == 0) return STATUS_INVALID_PARAMETER;
@@ -514,5 +523,95 @@ NTSTATUS WriteProcessMemory(HANDLE ProcessId, PVOID Address, PVOID Buffer, SIZE_
     }
     KeUnstackDetachProcess(&apcState);
     ObDereferenceObject(eproc);
+    return status;
+}
+
+// ========== v1.7.0 新增函数 ==========
+
+PVOID GetThreadTeb(HANDLE ThreadId)
+{
+    if (ThreadId == NULL) return NULL;
+    PETHREAD ethread = NULL;
+    if (!NT_SUCCESS(PsLookupThreadByThreadId(ThreadId, &ethread))) return NULL;
+    UNICODE_STRING funcName;
+    RtlInitUnicodeString(&funcName, L"PsGetThreadTeb");
+    PVOID (*pfnPsGetThreadTeb)(PETHREAD) = (PVOID (*)(PETHREAD))MmGetSystemRoutineAddress(&funcName);
+    PVOID teb = NULL;
+    if (pfnPsGetThreadTeb) {
+        teb = pfnPsGetThreadTeb(ethread);
+    }
+    ObDereferenceObject(ethread);
+    return teb;
+}
+
+HANDLE GetProcessParentId(HANDLE ProcessId)
+{
+    if (ProcessId == NULL) return NULL;
+
+    HANDLE hProcess = NULL;
+    CLIENT_ID clientId;
+    clientId.UniqueProcess = ProcessId;
+    clientId.UniqueThread = NULL;
+
+    OBJECT_ATTRIBUTES oa;
+    InitializeObjectAttributes(&oa, NULL, 0, NULL, NULL);
+
+    NTSTATUS status = ZwOpenProcess(
+        &hProcess,
+        PROCESS_QUERY_INFORMATION,
+        &oa,
+        &clientId
+    );
+    if (!NT_SUCCESS(status)) return NULL;
+
+    PROCESS_BASIC_INFORMATION pbi;
+    status = ZwQueryInformationProcess(
+        hProcess,
+        ProcessBasicInformation,
+        &pbi,
+        sizeof(pbi),
+        NULL
+    );
+
+    HANDLE parentPid = NULL;
+    if (NT_SUCCESS(status)) {
+        parentPid = (HANDLE)pbi.InheritedFromUniqueProcessId;
+    }
+
+    ZwClose(hProcess);
+    return parentPid;
+}
+
+PVOID GetModuleEntryPoint(PCWSTR ModuleName)
+{
+    if (!ModuleName) return NULL;
+    PVOID base = GetModuleBaseByName(ModuleName);
+    if (!base) return NULL;
+    __try {
+        PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)base;
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return NULL;
+        PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)((PUCHAR)base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) return NULL;
+        ULONG_PTR entryRva = nt->OptionalHeader.AddressOfEntryPoint;
+        if (entryRva == 0) return NULL;
+        return (PVOID)((PUCHAR)base + entryRva);
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        return NULL;
+    }
+}
+
+NTSTATUS SafeCompareKernelMemory(PVOID Address1, PVOID Address2, SIZE_T Size, PBOOLEAN Equal)
+{
+    if (!Address1 || !Address2 || !Equal || Size == 0) return STATUS_INVALID_PARAMETER;
+    NTSTATUS status = STATUS_SUCCESS;
+    BOOLEAN result = FALSE;
+    __try {
+        result = (RtlCompareMemory(Address1, Address2, Size) == Size);
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        status = GetExceptionCode();
+    }
+    *Equal = result;
     return status;
 }

@@ -21,3 +21,7 @@ EXPORTS
     WriteProcessMemory
     GetProcessPeb
     GetProcessMainModuleBase
+    GetThreadTeb
+    GetProcessParentId
+    GetModuleEntryPoint
+    SafeCompareKernelMemory

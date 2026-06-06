@@ -53,3 +53,9 @@ NTSTATUS ReadProcessMemory(HANDLE ProcessId, PVOID Address, PVOID Buffer, SIZE_T
 NTSTATUS WriteProcessMemory(HANDLE ProcessId, PVOID Address, PVOID Buffer, SIZE_T Size);
 PVOID GetProcessPeb(HANDLE ProcessId);
 PVOID GetProcessMainModuleBase(HANDLE ProcessId);
+
+// v1.7.0
+PVOID GetThreadTeb(HANDLE ThreadId);
+HANDLE GetProcessParentId(HANDLE ProcessId);
+PVOID GetModuleEntryPoint(PCWSTR ModuleName);
+NTSTATUS SafeCompareKernelMemory(PVOID Address1, PVOID Address2, SIZE_T Size, PBOOLEAN Equal);
